@@ -1,0 +1,62 @@
+# test this goreleaser config with:
+# - cd fsort
+# - goreleaser build --config .goreleaser.yml --rm-dist --skip-validate --single-target
+
+before:
+  hooks:
+   - make clean
+
+builds:
+  - no_unique_dist_dir: true
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/poerhiza/fsort/BuildVersion={{ .CommitDate }} -buildid={{.FullCommit}}
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - 386
+    id: fsort
+    main: ./main.go
+    binary: "binaries_{{ .Target }}/fsort"
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+checksum:
+  name_template: "{{ .ProjectName }}_checksums.txt"
+  algorithm: sha384
+
+release:
+  header: |
+    ## FSort ({{ .Date }})
+
+    Merge and sort those big'ol passwords lists with easy...
+
+  github:
+    owner: poerhiza
+    name: fsort
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+archives:
+  -
+    wrap_in_directory: true
+    format: tar.xz
+    name_template: "{{ .Arch }}_{{ .Os }}_{{ .ProjectName}}"
+    files:
+      - README.md
+      - LICENSE
+
+source:
+  enabled: true
+  name_template: '{{ .ProjectName }}-{{ .FullCommit }}'
+  format: 'tar.gz'
