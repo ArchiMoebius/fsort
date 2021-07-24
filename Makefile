@@ -5,7 +5,7 @@ BUILD=$(shell git rev-parse HEAD)
 BASEDIR=./dist
 DIR=${BASEDIR}/temp
 
-LDFLAGS=-ldflags "-s -w -X main.build=${BUILD} -X github.com/poerhiza/fsort/BuildVersion=${VERSION} -buildid=${BUILD}"
+LDFLAGS=-ldflags "-s -w -X github.com/poerhiza/fsort/main.Version=${VERSION} -buildid=${BUILD}"
 GCFLAGS=-gcflags=all=-trimpath=$(shell echo ${HOME})
 ASMFLAGS=-asmflags=all=-trimpath=$(shell echo ${HOME})
 

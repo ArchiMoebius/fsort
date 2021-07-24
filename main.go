@@ -9,16 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bsm/extsort"
 	"github.com/fatih/color"
 	art "github.com/plar/go-adaptive-radix-tree"
+	sortutils "github.com/twotwotwo/sorts"
 )
 
-//BuildDate populated upon build by goreleaser or the Makefile
-var BuildDate = ""
-var linecountoutputat uint64 = 100000
+//Version populated upon build by goreleaser or the Makefile
+var Version = ""
+var linecountoutputat uint64 = 1000000 // every million lines output, print if verbose mode
 
 type filesFlag []string
 
@@ -29,6 +32,30 @@ func (i *filesFlag) String() string {
 func (i *filesFlag) Set(value string) error {
 	*i = append(*i, strings.TrimSpace(value))
 	return nil
+}
+
+func scanRunes(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	start := 0
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	end := start
+
+	for width, i := 0, start; i < len(data); i += width {
+		var r rune
+		r, width = utf8.DecodeRune(data[i:])
+		if r == '\n' {
+			return i + width, data[start:i], nil
+		}
+		end = i + 1
+	}
+
+	if atEOF && len(data) > start {
+		return len(data), data[start:end], nil
+	}
+
+	return 0, nil, nil
 }
 
 func methodRadix(maxLineLength int, fileList filesFlag, file *os.File, verbose bool) {
@@ -49,14 +76,21 @@ func methodRadix(maxLineLength int, fileList filesFlag, file *os.File, verbose b
 			color.Red(fmt.Sprintf("[!]\tunable to read %s - %v\n", filename, err))
 			return
 		}
-
 		defer filein.Close()
-		buffer := make([]byte, 0, maxLineLength)
+
+		var maxlen int = 13000
+
+		if maxLineLength != -1 {
+			maxlen = maxLineLength
+		}
+
+		buffer := make([]byte, 0, maxlen)
 		scanner := bufio.NewScanner(filein)
-		scanner.Buffer(buffer, maxLineLength)
+		scanner.Split(scanRunes)
+		scanner.Buffer(buffer, maxlen)
 
 		if verbose {
-			color.Green(fmt.Sprintf("[+]\tReading %s\n", filename))
+			color.Green(fmt.Sprintf("[+]\tReading %s with max line length of %d\n", filename, maxlen))
 			printMemStats()
 		}
 
@@ -76,15 +110,20 @@ func methodRadix(maxLineLength int, fileList filesFlag, file *os.File, verbose b
 	}
 
 	total = linecount
+	var nextupdate uint64 = linecount
 
 	for it := sorter.Iterator(); it.HasNext(); {
 		node, _ := it.Next()
-		file.Write(node.Key())
-		file.WriteString("\n")
+
+		if _, err := file.Write(append(node.Key(), "\n"...)); err != nil {
+			color.Red("[!] Failed to write line to file for key %s\n", node.Key())
+		}
+
 		linecount--
 
-		if verbose && linecount%linecountoutputat == 0 {
+		if verbose && linecount < nextupdate {
 			color.Green(fmt.Sprintf("[+]\t%d / %d\n", total, linecount))
+			nextupdate = nextupdate - linecountoutputat
 		}
 	}
 
@@ -94,16 +133,45 @@ func methodRadix(maxLineLength int, fileList filesFlag, file *os.File, verbose b
 	}
 }
 
-func methodExtsort(maxLineLength int, fileList filesFlag, file *os.File, verbose bool) {
+func SortByteArrays(src [][]byte) {
+	sort.Slice(src, func(i, j int) bool { return bytes.Compare(src[i], src[j]) < 0 })
+}
+
+func methodExtsort(tmpdir string, maxLineLength int, fileList filesFlag, file *os.File, verbose bool) {
 
 	if verbose {
 		color.Green("[+] Starting method extsort")
 	}
+	var filecount uint64 = 0
 	var linecount uint64 = 0
 	var total uint64 = 0
 
+	if tmpdir == "" {
+		d, err := os.MkdirTemp("", "fsort_m_extsort_tmp*")
+
+		tmpdir = d
+
+		if err != nil {
+			color.Red(fmt.Sprintf("[!] error: %s - mkdir failed %s\n", err.Error(), tmpdir))
+			log.Fatal(err)
+		}
+	} else {
+		err := os.MkdirAll(tmpdir, 0777)
+
+		if err != nil {
+			color.Red(fmt.Sprintf("[!] error: %s - mkdir failed %s\n", err.Error(), tmpdir))
+			log.Fatal(err)
+		}
+	}
+
+	defer os.RemoveAll(tmpdir) // clean up
+
 	sorter := extsort.New(&extsort.Options{
-		Dedupe: bytes.Equal,
+		Sort:        sortutils.Quicksort,
+		BufferSize:  2 * 1024 * 1024, // 2 GiB buffer - enough? or make dynamic?
+		Dedupe:      bytes.Equal,
+		WorkDir:     tmpdir,
+		Compression: extsort.CompressionSnappy,
 	})
 	defer sorter.Close()
 
@@ -117,23 +185,34 @@ func methodExtsort(maxLineLength int, fileList filesFlag, file *os.File, verbose
 		}
 
 		defer filein.Close()
+		var maxlen int = 13000
 
-		buffer := make([]byte, 0, maxLineLength)
+		if maxLineLength != -1 {
+			maxlen = maxLineLength
+		}
+
+		buffer := make([]byte, 0, maxlen)
 		scanner := bufio.NewScanner(filein)
-		scanner.Buffer(buffer, maxLineLength)
+		scanner.Split(scanRunes)
+		scanner.Buffer(buffer, maxlen)
 
 		if verbose {
-			color.Green(fmt.Sprintf("[+]\tReading %s\n", filename))
+			color.Green(fmt.Sprintf("[+]\tReading %s with max line length of %d\n", filename, maxlen))
+			printMemStats()
 		}
 
 		for scanner.Scan() {
 			_ = sorter.Put(scanner.Bytes(), nil)
+			filecount++
 			linecount++
 		}
 
 		if err := scanner.Err(); err != nil {
-			log.Fatal(err)
+			color.Red(fmt.Sprintf("[!] error: %s - on %s:%d\n", err.Error(), filename, filecount))
+			panic(err)
 		}
+
+		filecount = 0
 	}
 
 	if verbose {
@@ -153,14 +232,18 @@ func methodExtsort(maxLineLength int, fileList filesFlag, file *os.File, verbose
 	}
 
 	total = linecount
+	var nextupdate uint64 = linecount
 
 	for iter.Next() {
-		file.Write(iter.Key())
-		file.WriteString("\n")
+
+		if _, err := file.Write(append(iter.Key(), "\n"...)); err != nil {
+			color.Red("[!] Failed to write line to file for key %s", iter.Key())
+		}
 		linecount--
 
-		if verbose && linecount%linecountoutputat == 0 {
+		if verbose && linecount < nextupdate {
 			color.Green(fmt.Sprintf("[+]\t%d / %d\n", total, linecount))
+			nextupdate = nextupdate - linecountoutputat
 		}
 	}
 
@@ -179,9 +262,10 @@ func main() {
 	var fileList filesFlag
 
 	flag.Var(&fileList, "file", "Merge and Sort this file as well")
-	maxLineLength := flag.Int("maxlen", 350, "There must not be a line is longer than this")
+	maxLineLength := flag.Int("maxlen", -1, "There must not be a line is longer than this")
 	method := flag.String("method", "extsort", "The method to use for merge/sort: options are radix,extsort - radix is faster, but uses more memory - extsort is slower but uses less memory (many large files, this is your option)")
 	outfile := flag.String("out", "", "The result of merging and sorting the files provided")
+	tmpdir := flag.String("tmpdir", "", "Use this location as the base directory (when using extsort)")
 	version := flag.Bool("version", false, "Display the version and exit")
 	verbose := flag.Bool("verbose", false, "Display memory usage")
 
@@ -189,7 +273,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		color.Blue(fmt.Sprintf("fsort %s", BuildDate))
+		color.Blue(fmt.Sprintf("fsort %s", Version))
 		os.Exit(0)
 	}
 
@@ -225,11 +309,13 @@ func main() {
 	if *method == "radix" {
 		methodRadix(*maxLineLength, fileList, file, *verbose)
 	} else if *method == "extsort" {
-		methodExtsort(*maxLineLength, fileList, file, *verbose)
+		methodExtsort(*tmpdir, *maxLineLength, fileList, file, *verbose)
 	} else {
 		color.Red(fmt.Sprintf("[!] bad method %s\n", *method))
 		usage()
 	}
+
+	runtime.GC()
 }
 
 func usage() {
