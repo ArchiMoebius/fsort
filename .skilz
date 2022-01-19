@@ -1,0 +1,16 @@
+{
+  "branch": "main",
+  "description": "A utility to learn more about Golang and provide a semi-efficient method by which one may join large files together",
+  "title": "FSort",
+  "links": [
+    {
+      "title": "View Source",
+      "href": "https://github.com/ArchiMoebius/fsort"
+    },
+    {
+      "title": "Download",
+      "href": "https://github.com/ArchiMoebius/fsort/releases/tag/v0.1.2"
+    }
+  ]
+}
+  
